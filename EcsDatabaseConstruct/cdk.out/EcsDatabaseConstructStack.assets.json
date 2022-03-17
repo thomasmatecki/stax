@@ -1,0 +1,19 @@
+{
+  "version": "16.0.0",
+  "files": {
+    "a6ae8ed363302e8812084707168a88ab5a1f5833a91ce18c85b9776b07dce767": {
+      "source": {
+        "path": "EcsDatabaseConstructStack.template.json",
+        "packaging": "file"
+      },
+      "destinations": {
+        "current_account-current_region": {
+          "bucketName": "cdk-hnb659fds-assets-${AWS::AccountId}-${AWS::Region}",
+          "objectKey": "a6ae8ed363302e8812084707168a88ab5a1f5833a91ce18c85b9776b07dce767.json",
+          "assumeRoleArn": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-hnb659fds-file-publishing-role-${AWS::AccountId}-${AWS::Region}"
+        }
+      }
+    }
+  },
+  "dockerImages": {}
+}
