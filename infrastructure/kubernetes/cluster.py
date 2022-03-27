@@ -2,6 +2,7 @@ import os
 from functools import cached_property
 
 from aws_cdk import Names, RemovalPolicy, Stack
+from aws_cdk import aws_autoscaling as autoscaling
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_s3 as s3
@@ -113,8 +114,6 @@ class Ec2Cluster(Stack):
 
         control_plane_user_data = ec2.UserData.for_linux()
 
-        #        token_command = self.get_token_command(self.secret_name, "us-east-1")
-
         control_plane_user_data.add_commands(
             *self.BASIC_SETUP,
             "sudo kubeadm config images pull",
@@ -159,7 +158,7 @@ class Ec2Cluster(Stack):
             key_name=self.KEY_PAIR_NAME,
         )
 
-    def get_worker_instance(
+    def get_worker_asg(
         self,
     ) -> ec2.Instance:
         worker_role = iam.Role(
@@ -190,9 +189,10 @@ class Ec2Cluster(Stack):
             user_data=worker_user_data,
         )
 
-        return ec2.Instance(
+        return autoscaling.AutoScalingGroup(
             self,
-            "WorkerNode",
+            "WorkerNodeASG",
+            # Instance Params
             vpc=self.vpc,
             vpc_subnets=[],
             role=worker_role,
@@ -203,6 +203,8 @@ class Ec2Cluster(Stack):
             ),
             machine_image=worker_image,
             key_name=self.KEY_PAIR_NAME,
+            # Scaling Params
+            desired_capacity=1,
         )
 
     @cached_property
@@ -273,9 +275,9 @@ class Ec2Cluster(Stack):
         control_instance.node.add_dependency(secret)
         control_instance.node.add_dependency(bucket)
 
-        worker_instance = self.get_worker_instance()
+        worker_group = self.get_worker_asg()
 
-        bucket.grant_read(worker_instance.role)
-        secret.grant_read(worker_instance.role)
+        bucket.grant_read(worker_group.role)
+        secret.grant_read(worker_group.role)
 
-        worker_instance.node.add_dependency(control_instance)
+        worker_group.node.add_dependency(control_instance)
