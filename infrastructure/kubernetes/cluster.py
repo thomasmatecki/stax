@@ -8,6 +8,8 @@ from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_secretsmanager as secretsmanager
 from constructs import Construct
 
+from kubernetes import commands
+
 
 class Ec2Cluster(Stack):
     """
@@ -36,15 +38,6 @@ class Ec2Cluster(Stack):
     ]
 
     KEY_PAIR_NAME = os.getenv("KEY_PAIR_NAME")
-
-    @classmethod
-    def get_token_command(cls, secret_name, region):
-        return " | ".join(
-            [
-                f"aws secretsmanager get-secret-value --secret-id {secret_name} --region={region}",
-                """jq -r '(.SecretString[0:6] + "." + .SecretString[6:])'""",
-            ]
-        )
 
     NODE_ROLE_POLICY_STATEMENTS = [
         iam.PolicyStatement(
@@ -120,12 +113,12 @@ class Ec2Cluster(Stack):
 
         control_plane_user_data = ec2.UserData.for_linux()
 
-        token_command = self.get_token_command(self.secret_name, "us-east-1")
+        #        token_command = self.get_token_command(self.secret_name, "us-east-1")
 
         control_plane_user_data.add_commands(
             *self.BASIC_SETUP,
-            f"TOKEN=$({token_command})",
             "sudo kubeadm config images pull",
+            f"TOKEN=$({commands.get_secret_kube_token(self.secret_name)})",
             'sudo kubeadm init --token="$TOKEN" --token-ttl=0 --pod-network-cidr=172.16.0.0/12',
             # Make kubectl useable.
             "mkdir -p $HOME/.kube",
@@ -133,11 +126,15 @@ class Ec2Cluster(Stack):
             "chown $(id -u):$(id -g) $HOME/.kube/config",
             f"aws s3 cp /etc/kubernetes/admin.conf s3://{self.bucket_name}/config",
             # Get Vpc CNI config.
-            "kubectl apply -f https://raw.githubusercontent.com/aws/amazon-vpc-cni-k8s/master/config/master/aws-k8s-cni.yaml",
+            commands.kubectl_apply_github(
+                "aws/amazon-vpc-cni-k8s/master/config/master/aws-k8s-cni.yaml"
+            ),
             # Enable Kubernetes Dashboard
-            "kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.5.0/aio/deploy/recommended.yaml"
+            commands.kubectl_apply_github(
+                "kubernetes/dashboard/v2.5.0/aio/deploy/recommended.yaml"
+            ),
             # Put the discovery file on s3.
-            f"""kubectl -n kube-public get cm cluster-info -o yaml | grep "kubeconfig:" -A11 | grep "apiVersion" -A10 | sed "s/    //" | aws s3 cp - s3://{self.bucket_name}/cluster-info.yaml""",
+            commands.put_kube_config(self.bucket_name),
         )
 
         control_image = ec2.MachineImage.generic_linux(
@@ -179,11 +176,9 @@ class Ec2Cluster(Stack):
 
         worker_user_data = ec2.UserData.for_linux()
 
-        token_command = self.get_token_command(self.secret_name, "us-east-1")
-
         worker_user_data.add_commands(
             *self.BASIC_SETUP,
-            f"TOKEN=$({token_command})",
+            f"TOKEN=$({commands.get_secret_kube_token(self.secret_name)})",
             f"aws s3 cp s3://{self.bucket_name}/cluster-info.yaml cluster-info.yaml",
             'sudo kubeadm join --token="$TOKEN" --discovery-file=cluster-info.yaml',
         )
