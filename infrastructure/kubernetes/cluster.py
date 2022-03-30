@@ -1,5 +1,6 @@
 import os
 from functools import cached_property
+from json import load
 
 from aws_cdk import Names, RemovalPolicy, Stack
 from aws_cdk import aws_autoscaling as autoscaling
@@ -12,7 +13,7 @@ from constructs import Construct
 from kubernetes import commands
 
 
-class Ec2Cluster(Stack):
+class K8sCluster(Stack):
     """
     Stack
     """
@@ -84,6 +85,9 @@ class Ec2Cluster(Stack):
         ),
     ]
 
+    with open("kubernetes/policies/alb_controller.json") as policy_file:
+        NODE_ALB_CONTROLLER_POLICY = iam.PolicyDocument.from_json(load(policy_file))
+
     @cached_property
     def vpc(self):
         return ec2.Vpc(
@@ -106,7 +110,7 @@ class Ec2Cluster(Stack):
             assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
             managed_policies=[],
             inline_policies={
-                "KubeNodePolicy": iam.PolicyDocument(
+                "KubeNode": iam.PolicyDocument(
                     statements=self.NODE_ROLE_POLICY_STATEMENTS
                 )
             },
@@ -132,6 +136,18 @@ class Ec2Cluster(Stack):
             commands.kubectl_apply_github(
                 "kubernetes/dashboard/v2.5.0/aio/deploy/recommended.yaml"
             ),
+            # Cert manager.
+            #       commands.kubectl_apply_github(
+            #           "jetstack/cert-manager/releases/download/v1.5.3/cert-manager.yaml",
+            #           user_content=False,
+            #           validate=False,
+            #       ),
+            #       # Apply the alb controller, setting --cluster-name from the VPC
+            #       commands.kubectl_apply_github(
+            #           "kubernetes-sigs/aws-load-balancer-controller/releases/download/v2.4.1/v2_4_1_full.yaml",
+            #           user_content=False,
+            #           sed=f"s/(--cluster-name=).*/\\1{self.vpc_id}/",
+            #       ),
             # Put the discovery file on s3.
             commands.put_kube_config(self.bucket_name),
         )
@@ -145,7 +161,7 @@ class Ec2Cluster(Stack):
 
         return ec2.Instance(
             self,
-            "ControlNode",
+            "Control",
             vpc=self.vpc,
             vpc_subnets=[],
             role=control_plane_role,
@@ -167,9 +183,12 @@ class Ec2Cluster(Stack):
             assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
             managed_policies=[],
             inline_policies={
-                "KubeNodePolicy": iam.PolicyDocument(
+                "KubeNode": iam.PolicyDocument(
                     statements=self.NODE_ROLE_POLICY_STATEMENTS
-                )
+                ),
+                # The controller runs on the worker nodes, so it needs access to
+                # the AWS ALB/NLB resources via IAM permissions
+                "KubeALBController": self.NODE_ALB_CONTROLLER_POLICY,
             },
         )
 
@@ -191,7 +210,7 @@ class Ec2Cluster(Stack):
 
         return autoscaling.AutoScalingGroup(
             self,
-            "WorkerNodeASG",
+            "Worker",
             # Instance Params
             vpc=self.vpc,
             vpc_subnets=[],

@@ -1,5 +1,18 @@
-def kubectl_apply_github(path):
-    return f"kubectl apply -f https://raw.githubusercontent.com/{path}"
+def kubectl_apply_github(path, user_content=True, sed=None, validate=True):
+
+    _validate_arg = "--validate=false " if not validate else ""
+
+    if user_content:
+        url = f"https://raw.githubusercontent.com/{path}"
+    else:
+        url = f"https://github.com/{path}"
+
+    if sed:
+        return " | ".join(
+            [f"curl -L {url}", f"sed -E '{sed}'", f"kubectl apply -f {_validate_arg} -"]
+        )
+
+    return f"kubectl apply -f {_validate_arg} {url}"
 
 
 def put_kube_config(bucket_name: str):

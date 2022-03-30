@@ -3,12 +3,12 @@ import os
 
 import aws_cdk as cdk
 
-from kubernetes.cluster import Ec2Cluster
+from kubernetes.cluster import K8sCluster
 
 app = cdk.App()
-Ec2Cluster(
+K8sCluster(
     app,
-    "Ec2Cluster",
+    "K8sCluster",
     # If you don't specify 'env', this stack will be environment-agnostic.
     # Account/Region-dependent features and context lookups will not work,
     # but a single synthesized template can be deployed anywhere.
