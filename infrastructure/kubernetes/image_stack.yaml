@@ -1,0 +1,157 @@
+Description: Create an AMI from an EC2 instance.
+Parameters:
+  ImageId:
+    Description: Image ID for base EC2 instance.
+    Type: AWS::EC2::Image::Id
+    # amzn-ami-hvm-2016.09.1.20161221-x86_64-gp2
+    Default: ami-9be6f38c
+  InstanceType:
+    Description: Instance type to launch EC2 instances.
+    Type: String
+    Default: m3.medium
+    AllowedValues: [ m3.medium, m3.large, m3.xlarge, m3.2xlarge ]
+Resources:
+  # Completes when the instance is fully provisioned and ready for AMI creation.
+  AMICreate:
+    Type: AWS::CloudFormation::WaitCondition
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT10M
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash -x
+          yum -y install mysql # provisioning example
+          /opt/aws/bin/cfn-signal \
+            -e $? \
+            --stack ${AWS::StackName} \
+            --region ${AWS::Region} \
+            --resource AMICreate
+          shutdown -h now
+  AMI:
+    Type: Custom::AMI
+    DependsOn: AMICreate
+    Properties:
+      ServiceToken: !GetAtt AMIFunction.Arn
+      InstanceId: !Ref Instance
+  AMIFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import logging
+          import cfnresponse
+          import json
+          import boto3
+          from threading import Timer
+          from botocore.exceptions import WaiterError
+  
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+  
+          def handler(event, context):
+  
+            ec2 = boto3.resource('ec2')
+            physicalId = event['PhysicalResourceId'] if 'PhysicalResourceId' in event else None
+  
+            def success(data={}):
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, data, physicalId)
+  
+            def failed(e):
+              cfnresponse.send(event, context, cfnresponse.FAILED, str(e), physicalId)
+  
+            logger.info('Request received: %s\n' % json.dumps(event))
+  
+            try:
+              instanceId = event['ResourceProperties']['InstanceId']
+              if (not instanceId):
+                raise 'InstanceID required'
+  
+              if not 'RequestType' in event:
+                success({'Data': 'Unhandled request type'})
+                return
+  
+              if event['RequestType'] == 'Delete':
+                if (not physicalId.startswith('ami-')):
+                  raise 'Unknown PhysicalId: %s' % physicalId
+  
+                ec2client = boto3.client('ec2')
+                images = ec2client.describe_images(ImageIds=[physicalId])
+                for image in images['Images']:
+                  ec2.Image(image['ImageId']).deregister()
+                  snapshots = ([bdm['Ebs']['SnapshotId'] 
+                                for bdm in image['BlockDeviceMappings'] 
+                                if 'Ebs' in bdm and 'SnapshotId' in bdm['Ebs']])
+                  for snapshot in snapshots:
+                    ec2.Snapshot(snapshot).delete()
+  
+                success({'Data': 'OK'})
+              elif event['RequestType'] in set(['Create', 'Update']):
+                if not physicalId:  # AMI creation has not been requested yet
+                  instance = ec2.Instance(instanceId)
+                  instance.wait_until_stopped()
+  
+                  image = instance.create_image(Name="Automatic from CloudFormation stack ${AWS::StackName}")
+  
+                  physicalId = image.image_id
+                else:
+                  logger.info('Continuing in awaiting image available: %s\n' % physicalId)
+  
+                ec2client = boto3.client('ec2')
+                waiter = ec2client.get_waiter('image_available')
+  
+                try:
+                  waiter.wait(ImageIds=[physicalId], WaiterConfig={'Delay': 30, 'MaxAttempts': 6})
+                except WaiterError as e:
+                  # Request the same event but set PhysicalResourceId so that the AMI is not created again
+                  event['PhysicalResourceId'] = physicalId
+                  logger.info('Timeout reached, continuing function: %s\n' % json.dumps(event))
+                  lambda_client = boto3.client('lambda')
+                  lambda_client.invoke(FunctionName=context.invoked_function_arn, 
+                                        InvocationType='Event',
+                                        Payload=json.dumps(event))
+                  return
+  
+                success({'Data': 'OK'})
+              else:
+                success({'Data': 'OK'})
+            except Exception as e:
+              failed(e)
+      Runtime: python2.7
+      Timeout: 300
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: [lambda.amazonaws.com]}
+          Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaRole
+      Policies:
+      - PolicyName: EC2Policy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+              - 'ec2:DescribeInstances'
+              - 'ec2:DescribeImages'
+              - 'ec2:CreateImage'
+              - 'ec2:DeregisterImage'
+              - 'ec2:DescribeSnapshots'
+              - 'ec2:DeleteSnapshot'
+              Resource: ['*']
+Outputs:
+  AMI:
+    Value: !Ref AMI

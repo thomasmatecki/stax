@@ -2,10 +2,12 @@ import os
 from functools import cached_property
 from json import load
 
-from aws_cdk import Names, RemovalPolicy, Stack
+from aws_cdk import Duration, Names, RemovalPolicy, Stack
 from aws_cdk import aws_autoscaling as autoscaling
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
+from aws_cdk import aws_route53 as route53
+from aws_cdk import aws_route53_targets as targets
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_secretsmanager as secretsmanager
 from constructs import Construct
@@ -122,12 +124,15 @@ class K8sCluster(Stack):
             *self.BASIC_SETUP,
             "sudo kubeadm config images pull",
             f"TOKEN=$({commands.get_secret_kube_token(self.secret_name)})",
-            'sudo kubeadm init --token="$TOKEN" --token-ttl=0 --pod-network-cidr=172.16.0.0/12',
+            'sudo kubeadm init --token="$TOKEN" --token-ttl=0',
             # Make kubectl useable.
             "mkdir -p $HOME/.kube",
             "cp -i /etc/kubernetes/admin.conf $HOME/.kube/config",
             "chown $(id -u):$(id -g) $HOME/.kube/config",
+            # ... and for ubuntu.
+            "mkdir /home/ubuntu/.kube/ && sudo cp /etc/kubernetes/admin.conf /home/ubuntu/.kube/config && sudo chown ubuntu /home/ubuntu/.kube/config; done",
             f"aws s3 cp /etc/kubernetes/admin.conf s3://{self.bucket_name}/config",
+            "curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash",
             # Get Vpc CNI config.
             commands.kubectl_apply_github(
                 "aws/amazon-vpc-cni-k8s/master/config/master/aws-k8s-cni.yaml"
@@ -285,6 +290,21 @@ class K8sCluster(Stack):
         )
 
         control_instance = self.get_control_instance()
+
+        hosted_zone = route53.HostedZone.from_lookup(
+            self, "KubeClusterZone", domain_name="kubr.me"
+        )
+
+        route53.ARecord(
+            self,
+            "KubrControl",
+            zone=hosted_zone,
+            target=route53.RecordTarget.from_ip_addresses(
+                control_instance.instance_public_ip
+            ),
+            record_name="control",
+            ttl=Duration.minutes(10),
+        )
 
         # Grant the control instance to the secret and bucket
         bucket.grant_write(control_instance.role)
